@@ -22,6 +22,21 @@ A comprehensive PowerShell script that automatically updates all Visual C++ Redi
 - ✅ Visual C++ 2013 - If installed
 - ✅ Visual C++ 2015-2022 (latest unified) - If installed
 
+## Quick Start
+
+**Run from PowerShell (as Administrator):**
+```powershell
+iex (iwr "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -UseBasicParsing).Content
+```
+
+**Run from ScreenConnect:**
+```powershell
+#!ps
+#maxlength=200000
+#timeout=300000
+iex (iwr "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -UseBasicParsing).Content
+```
+
 ## Scripts
 
 ### visualc++updater.ps1
@@ -47,31 +62,103 @@ Compact output specifically formatted for ConnectWise ScreenConnect commands.
 
 ## Usage
 
-### Standard Usage
+### Local Usage
 ```powershell
-# Run the main script
+# Run the main script locally
 .\visualc++updater.ps1
 ```
 
-### ScreenConnect Command
+### Run Directly from Web (PowerShell)
+
+**Standard Output (Detailed):**
 ```powershell
-#!ps
-#maxlength=200000
-#timeout=300000
-$ProgressPreference='SilentlyContinue'
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -OutFile "C:\temp\visualc++updater.ps1"
-& "C:\temp\visualc++updater.ps1"
+# Download and execute with full output
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$script = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -UseBasicParsing
+Invoke-Expression $script.Content
 ```
 
-### ScreenConnect with Compact Output
+**One-liner (Advanced):**
+```powershell
+# Single command execution
+iex (iwr -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -UseBasicParsing).Content
+```
+
+**Save and Execute:**
+```powershell
+# Download to temp folder and run
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -OutFile "$env:TEMP\visualc++updater.ps1" -UseBasicParsing
+& "$env:TEMP\visualc++updater.ps1"
+```
+
+### ConnectWise ScreenConnect Commands
+
+**Option 1: Full Output (Recommended)**
 ```powershell
 #!ps
 #maxlength=200000
 #timeout=300000
 $ProgressPreference='SilentlyContinue'
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater-screenconnect.ps1" -OutFile "C:\temp\visualc++updater-screenconnect.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -OutFile "C:\temp\visualc++updater.ps1"
-& "C:\temp\visualc++updater-screenconnect.ps1"
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+$temp="$env:TEMP\visualc++updater.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -OutFile $temp -UseBasicParsing
+& $temp
+```
+
+**Option 2: Compact Output (Better for ScreenConnect Console)**
+```powershell
+#!ps
+#maxlength=200000
+#timeout=300000
+$ProgressPreference='SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+$temp="$env:TEMP"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater-screenconnect.ps1" -OutFile "$temp\vc-sc.ps1" -UseBasicParsing
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -OutFile "$temp\visualc++updater.ps1" -UseBasicParsing
+& "$temp\vc-sc.ps1"
+```
+
+**Option 3: Direct Execution (No File Save)**
+```powershell
+#!ps
+#maxlength=200000
+#timeout=300000
+$ProgressPreference='SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+iex (iwr "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1" -UseBasicParsing).Content
+```
+
+### RMM Tools (Datto, NinjaRMM, Atera, etc.)
+
+**PowerShell Script Component:**
+```powershell
+# Set TLS and progress preferences
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Download script
+$scriptUrl = "https://raw.githubusercontent.com/monobrau/visualcpp-updater/main/visualc++updater.ps1"
+$scriptPath = Join-Path $env:TEMP "visualc++updater.ps1"
+Invoke-WebRequest -Uri $scriptUrl -OutFile $scriptPath -UseBasicParsing
+
+# Execute with error handling
+try {
+    & $scriptPath
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 3010) {
+        Write-Output "SUCCESS: Updates installed. Reboot required."
+    } elseif ($exitCode -eq 0) {
+        Write-Output "SUCCESS: All updates completed."
+    } else {
+        Write-Output "WARNING: Script exited with code $exitCode"
+    }
+    exit $exitCode
+} catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
+    exit 1
+}
 ```
 
 ## Requirements
@@ -92,15 +179,23 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/monobrau/visualcpp-upd
    - For current versions: Checks if installed version is recent enough
    - Smart handling of registry version formats
 
-3. **Update Phase**
+3. **Dynamic URL Resolution** (New!)
+   - **Method 1**: Queries winget package manifests from GitHub
+   - **Method 2**: Scrapes Microsoft Download Center confirmation pages
+   - **Method 3**: Falls back to hardcoded URLs if dynamic methods fail
+   - Ensures script continues working even if Microsoft reorganizes downloads
+   - 2015-2022 versions use aka.ms URLs that auto-redirect to latest
+
+4. **Update Phase**
    - Downloads only necessary updates from official Microsoft sources
    - Installs silently without user interaction
    - Handles exit codes properly (0, 3010, 4096, 5100)
    - Cleans up temporary files
 
-4. **Reporting**
+5. **Reporting**
    - Shows detection results with color coding
    - Displays update status for each version
+   - Shows actual download URL being used
    - Reports success/failure with exit codes
 
 ## Exit Codes
@@ -170,8 +265,28 @@ Update process completed.
 
 - All downloads are from official Microsoft servers
 - No third-party hosting or modified installers
-- Downloads use HTTPS
+- Downloads use HTTPS exclusively (enforced via TLS 1.2)
 - File version verification included
+- Dynamic URL resolution uses trusted sources (GitHub winget-pkgs, Microsoft Download Center)
+
+## Important Notes
+
+### Running Scripts from the Web
+When using `iex (iwr ...)` to run scripts directly from the web:
+- ✅ **Pros**: No files left on disk, quick execution, always gets latest version
+- ⚠️ **Cons**: Cannot inspect code before execution, requires internet during run
+- 💡 **Best Practice**: Review the script on GitHub first, then run it
+
+### ScreenConnect Configuration
+- **Timeout**: Set to 300000ms (5 minutes) to allow for large downloads
+- **Max Length**: Set to 200000 to capture all output
+- **Shell**: Use PowerShell (#!ps) for best compatibility
+
+### RMM Tool Integration
+Exit codes are designed for automation:
+- `0` = Success (safe to continue)
+- `3010` = Success but reboot needed (schedule reboot)
+- `1` = Error (alert administrator)
 
 ## Troubleshooting
 
@@ -203,6 +318,23 @@ Created for system administrators managing Windows environments
 Contributions welcome! Please test thoroughly before submitting pull requests.
 
 ## Changelog
+
+### v2.1 (2025-01-XX)
+- **Dynamic URL Resolution**: Automatically resolves download URLs using multiple methods
+  - Queries winget package manifests from GitHub
+  - Scrapes Microsoft Download Center as backup
+  - Falls back to hardcoded URLs if needed
+- **Major Code Refactoring**: Reduced code from 1078 to 733 lines (-32%)
+  - Eliminated duplicate x86/x64 logic with reusable function
+  - Added exit code constants for better readability
+  - Improved error handling with detailed context
+- **Security Enhancements**:
+  - All URLs now use HTTPS exclusively
+  - Added temp directory validation with write permission checks
+  - Enhanced version comparison with better validation
+- **Professional Logging**: Replaced DEBUG output with proper Write-Verbose
+- **Wrapper Script Improvements**: Multi-location script discovery (PSScriptRoot, C:\temp, %TEMP%)
+- **Documentation**: Comprehensive web-based and ScreenConnect usage instructions
 
 ### v2.0 (2024-10-10)
 - Added Major.Minor.Build matching for EOL versions
