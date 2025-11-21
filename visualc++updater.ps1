@@ -19,13 +19,21 @@
     File Name: visualc++updater.ps1
     Run this script with administrative privileges.
     All URLs point to official Microsoft downloads (HTTPS only).
-    
+
     Version Checking:
     - EOL versions (2005, 2008, 2010, 2012, 2013): Compares against final known versions
     - Non-EOL versions (2015-2022): Only downloads if current version is older than recent threshold
     - Automatically detects if downloaded installer is newer than installed version
     - Skips installation if current version is already up to date
     - Avoids unnecessary downloads when versions are already current or recent enough
+
+    Dynamic URL Resolution:
+    - EOL versions: Dynamically resolves download URLs using multiple methods:
+      1. Winget package manifests (GitHub-hosted, community-maintained)
+      2. Microsoft Download Center confirmation pages (scraping)
+      3. Fallback to hardcoded URLs if dynamic resolution fails
+    - Current versions (2015-2022): Uses aka.ms URLs that auto-redirect to latest
+    - This ensures script continues working even if Microsoft reorganizes downloads
     
     Target Versions (EOL - Fixed):
     - 2005: 8.0.50727.6195 (KB2538242) - Final
@@ -76,25 +84,29 @@ Write-Host "Visual C++ All Versions Updater (2005-2022)" -ForegroundColor Cyan
 Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Define all Visual C++ versions and their download URLs
+# Define all Visual C++ versions with download information
+# For EOL versions, we use Microsoft Download Center IDs and fallback URLs
+# For current versions (2015-2022), aka.ms URLs automatically redirect to latest
 $VCVersions = @{
     "2005" = @{
         DisplayName = "Microsoft Visual C\+\+ 2005.*Redistributable"
         KB = "KB2538242"
         TargetVersion = "8.0.50727.6195"
         IsEOL = $true
-        URLs = @{
+        DownloadID = "26347"  # Microsoft Download Center ID
+        FallbackURLs = @{
             x86 = "https://www.microsoft.com/en-us/download/details.aspx?id=26347"
             x64 = "https://www.microsoft.com/en-us/download/details.aspx?id=26347"
         }
-        Note = "Download page only - direct URLs not available"
+        Note = "Manual download may be required"
     }
     "2008" = @{
         DisplayName = "Microsoft Visual C\+\+ 2008.*Redistributable"
         KB = "KB2538243"
         TargetVersion = "9.0.30729.5677"
         IsEOL = $true
-        URLs = @{
+        DownloadID = "26368"  # Microsoft Download Center ID for SP1 MFC Security Update
+        FallbackURLs = @{
             x86 = "https://download.windowsupdate.com/msdownload/update/software/secu/2011/05/vcredist_x86_470640aa4bb7db8e69196b5edb0010933569e98d.exe"
             x64 = "https://download.windowsupdate.com/msdownload/update/software/secu/2011/05/vcredist_x64_a7c83077b8a28d409e36316d2d7321fa0ccdb7e8.exe"
         }
@@ -104,7 +116,8 @@ $VCVersions = @{
         KB = "KB2565063"
         TargetVersion = "10.0.40219"
         IsEOL = $true
-        URLs = @{
+        DownloadID = "26999"  # Microsoft Download Center ID for SP1
+        FallbackURLs = @{
             x86 = "https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x86.exe"
             x64 = "https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x64.exe"
         }
@@ -114,7 +127,8 @@ $VCVersions = @{
         KB = "Update 4"
         TargetVersion = "11.0.61030.0"
         IsEOL = $true
-        URLs = @{
+        DownloadID = "30679"  # Microsoft Download Center ID for Update 4
+        FallbackURLs = @{
             x86 = "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x86.exe"
             x64 = "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x64.exe"
         }
@@ -124,7 +138,8 @@ $VCVersions = @{
         KB = "Latest"
         TargetVersion = "12.0.40649.5"
         IsEOL = $true
-        URLs = @{
+        DownloadID = "40784"  # Microsoft Download Center ID
+        FallbackURLs = @{
             x86 = "https://download.microsoft.com/download/c/c/2/cc2df5f8-4454-44b4-802d-5ea68d086676/vcredist_x86.exe"
             x64 = "https://download.microsoft.com/download/c/c/2/cc2df5f8-4454-44b4-802d-5ea68d086676/vcredist_x64.exe"
         }
@@ -135,11 +150,108 @@ $VCVersions = @{
         TargetVersion = $null
         MinRecentVersion = "14.40.0.0"  # Skip download if version is newer than this
         IsEOL = $false
+        # aka.ms URLs automatically redirect to latest version - no resolution needed
         URLs = @{
             x86 = "https://aka.ms/vs/17/release/vc_redist.x86.exe"
             x64 = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
         }
     }
+}
+
+# Function to resolve Microsoft Download Center ID to actual download URLs
+function Get-MicrosoftDownloadUrl {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$DownloadID,
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('x86', 'x64')]
+        [string]$Architecture,
+        [Parameter(Mandatory=$false)]
+        [hashtable]$FallbackURLs
+    )
+
+    Write-Verbose "Attempting to resolve download URL for ID: $DownloadID, Architecture: $Architecture"
+
+    try {
+        # Method 1: Try winget package manifests (community-maintained, most reliable)
+        $wingetManifestUrl = switch ($DownloadID) {
+            "26368" {
+                if ($Architecture -eq 'x86') {
+                    "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/m/Microsoft/VCRedist/2008/Redistributable/9.0.30729.6161/Microsoft.VCRedist.2008.Redistributable.9.0.30729.6161.installer.yaml"
+                } else {
+                    "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/m/Microsoft/VCRedist/2008/Redistributable/9.0.30729.6161/Microsoft.VCRedist.2008.Redistributable.9.0.30729.6161.installer.yaml"
+                }
+            }
+            "26999" {
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/m/Microsoft/VCRedist/2010/Redistributable/10.0.40219/Microsoft.VCRedist.2010.Redistributable.10.0.40219.installer.yaml"
+            }
+            "30679" {
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/m/Microsoft/VCRedist/2012/Redistributable/11.0.61030.0/Microsoft.VCRedist.2012.Redistributable.11.0.61030.0.installer.yaml"
+            }
+            "40784" {
+                "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/m/Microsoft/VCRedist/2013/Redistributable/12.0.40664.0/Microsoft.VCRedist.2013.Redistributable.12.0.40664.0.installer.yaml"
+            }
+            default { $null }
+        }
+
+        if ($wingetManifestUrl) {
+            Write-Verbose "Fetching winget manifest: $wingetManifestUrl"
+            $manifestContent = Invoke-WebRequest -Uri $wingetManifestUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+
+            # Parse YAML-like content for InstallerUrl matching the architecture
+            $archPattern = if ($Architecture -eq 'x86') { 'x86|Win32' } else { 'x64|AMD64' }
+            $lines = $manifestContent.Content -split "`n"
+
+            $inInstaller = $false
+            $currentArch = $null
+
+            foreach ($line in $lines) {
+                if ($line -match '^\s*-\s*Architecture:\s*(.+)') {
+                    $currentArch = $matches[1].Trim()
+                    $inInstaller = $currentArch -match $archPattern
+                }
+
+                if ($inInstaller -and $line -match '^\s*InstallerUrl:\s*(.+)') {
+                    $url = $matches[1].Trim()
+                    Write-Verbose "Found URL from winget manifest: $url"
+                    return $url
+                }
+            }
+        }
+
+        # Method 2: Try direct Microsoft Download Center confirmation page scraping
+        Write-Verbose "Winget method failed, trying Microsoft Download Center"
+        $downloadPageUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$DownloadID"
+        $response = Invoke-WebRequest -Uri $downloadPageUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+
+        # Look for .exe download links
+        $archPattern = if ($Architecture -eq 'x86') { 'x86|_x86\.exe' } else { 'x64|_x64\.exe|amd64' }
+        $links = $response.Links | Where-Object {
+            $_.href -match '\.exe$' -and $_.href -match $archPattern
+        }
+
+        if ($links -and $links[0].href) {
+            $url = $links[0].href
+            # Make sure it's an absolute URL
+            if ($url -notmatch '^https?://') {
+                $url = "https://download.microsoft.com" + $url
+            }
+            Write-Verbose "Found URL from download page: $url"
+            return $url
+        }
+    }
+    catch {
+        Write-Verbose "Dynamic URL resolution failed: $_"
+    }
+
+    # Fallback to static URLs
+    if ($FallbackURLs -and $FallbackURLs[$Architecture]) {
+        Write-Verbose "Using fallback URL: $($FallbackURLs[$Architecture])"
+        return $FallbackURLs[$Architecture]
+    }
+
+    Write-Warning "Could not resolve download URL for ID $DownloadID ($Architecture)"
+    return $null
 }
 
 # Function to detect installed Visual C++ version
@@ -421,85 +533,98 @@ function Update-VCRedistArchitecture {
 
     Write-Host "[$CurrentUpdate/$TotalUpdates] Processing $Architecture version..." -ForegroundColor Cyan
 
-    $url = $VCInfo.URLs.$Architecture
-
-    if ($VCInfo.Note -eq "Download page only - direct URLs not available") {
-        Write-Host "  NOTE: Visual C++ $Version requires manual download" -ForegroundColor Yellow
-        Write-Host "  Please visit: $url" -ForegroundColor Yellow
-        Write-Host "  Skipping automated update for this version." -ForegroundColor Yellow
+    # Resolve download URL dynamically for EOL versions, use direct URLs for current versions
+    $url = $null
+    if ($VCInfo.DownloadID) {
+        # EOL version - try dynamic resolution
+        $url = Get-MicrosoftDownloadUrl -DownloadID $VCInfo.DownloadID -Architecture $Architecture -FallbackURLs $VCInfo.FallbackURLs
     }
-    else {
-        $installerPath = Join-Path $TempDir "vcredist_${Version}_${Architecture}.exe"
-        [void]$DownloadedFiles.Add($installerPath)
+    elseif ($VCInfo.URLs) {
+        # Current version (2015-2022) - use aka.ms URL directly
+        $url = $VCInfo.URLs.$Architecture
+    }
 
-        try {
-            Write-Host "  Downloading..."
-            Invoke-WebRequest -Uri $url -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
-            Write-Host "  Download complete." -ForegroundColor Green
+    if (-not $url) {
+        Write-Host "  ERROR: Could not determine download URL for Visual C++ $Version $Architecture" -ForegroundColor Red
+        Write-Host ""
+        return
+    }
 
-            if (Test-Path $installerPath) {
-                # Check installer version for both EOL and non-EOL versions
-                $installerVersion = Get-InstallerVersion -FilePath $installerPath
-                $currentVersion = $InstalledDetails.DisplayVersion
+    if ($VCInfo.Note -eq "Manual download may be required") {
+        Write-Host "  NOTE: If automatic download fails, manual download may be required" -ForegroundColor Yellow
+        Write-Host "  Visit: https://www.microsoft.com/en-us/download/details.aspx?id=$($VCInfo.DownloadID)" -ForegroundColor Yellow
+    }
 
-                if ($installerVersion) {
-                    Write-Host "  Downloaded installer version: $installerVersion" -ForegroundColor Gray
+    $installerPath = Join-Path $TempDir "vcredist_${Version}_${Architecture}.exe"
+    [void]$DownloadedFiles.Add($installerPath)
 
-                    if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $installerVersion)) {
-                        Write-Host "  Current version ($currentVersion) is already same or newer than installer ($installerVersion) - Skipping installation" -ForegroundColor Cyan
-                        Write-Host ""
-                        return
-                    }
+    try {
+        Write-Host "  Downloading from: $url" -ForegroundColor Gray
+        Invoke-WebRequest -Uri $url -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+        Write-Host "  Download complete." -ForegroundColor Green
+
+        if (Test-Path $installerPath) {
+            # Check installer version for both EOL and non-EOL versions
+            $installerVersion = Get-InstallerVersion -FilePath $installerPath
+            $currentVersion = $InstalledDetails.DisplayVersion
+
+            if ($installerVersion) {
+                Write-Host "  Downloaded installer version: $installerVersion" -ForegroundColor Gray
+
+                if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $installerVersion)) {
+                    Write-Host "  Current version ($currentVersion) is already same or newer than installer ($installerVersion) - Skipping installation" -ForegroundColor Cyan
+                    Write-Host ""
+                    return
                 }
+            }
 
-                Write-Host "  Installing..."
-                $silentArgs = $SilentArgsMap[$Version]
-                $Process = Start-Process -FilePath $installerPath -ArgumentList $silentArgs -Wait -PassThru -WindowStyle Hidden
+            Write-Host "  Installing..."
+            $silentArgs = $SilentArgsMap[$Version]
+            $Process = Start-Process -FilePath $installerPath -ArgumentList $silentArgs -Wait -PassThru -WindowStyle Hidden
 
-                switch ($Process.ExitCode) {
-                    $EXIT_SUCCESS {
-                        Write-Host "  Installation successful." -ForegroundColor Green
+            switch ($Process.ExitCode) {
+                $EXIT_SUCCESS {
+                    Write-Host "  Installation successful." -ForegroundColor Green
 
-                        # Verify what changed
-                        if ($VCInfo.IsEOL) {
-                            Start-Sleep -Seconds 2
-                            $newCheck = Test-VCInstalled -DisplayNamePattern $VCInfo.DisplayName -Architecture $Architecture
-                            if ($newCheck.Installed -and $newCheck.Details.DisplayVersion) {
-                                Write-Host "  Registry version after install: $($newCheck.Details.DisplayVersion)" -ForegroundColor Cyan
-                            }
+                    # Verify what changed
+                    if ($VCInfo.IsEOL) {
+                        Start-Sleep -Seconds 2
+                        $newCheck = Test-VCInstalled -DisplayNamePattern $VCInfo.DisplayName -Architecture $Architecture
+                        if ($newCheck.Installed -and $newCheck.Details.DisplayVersion) {
+                            Write-Host "  Registry version after install: $($newCheck.Details.DisplayVersion)" -ForegroundColor Cyan
+                        }
 
-                            # Check if KB is now detected
-                            if ($VCInfo.KB -match "KB\d+") {
-                                $kbCheck = Test-KBInstalled -KBNumber $VCInfo.KB
-                                Write-Host "  $($VCInfo.KB) detected: $kbCheck" -ForegroundColor Cyan
-                            }
+                        # Check if KB is now detected
+                        if ($VCInfo.KB -match "KB\d+") {
+                            $kbCheck = Test-KBInstalled -KBNumber $VCInfo.KB
+                            Write-Host "  $($VCInfo.KB) detected: $kbCheck" -ForegroundColor Cyan
                         }
                     }
-                    $EXIT_REBOOT_REQUIRED {
-                        Write-Host "  Installation successful. Reboot required." -ForegroundColor Yellow
-                        $RebootRequired.Value = $true
-                    }
-                    $EXIT_ALREADY_INSTALLED {
-                        Write-Host "  Already installed or newer version present (exit code $EXIT_ALREADY_INSTALLED)." -ForegroundColor Cyan
-                        # Create a marker file to prevent future attempts
-                        $markerPath = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_4096.marker"
-                        Set-Content -Path $markerPath -Value (Get-Date).ToString()
-                    }
-                    $EXIT_NEWER_VERSION_PRESENT {
-                        Write-Host "  Already installed or newer version present (exit code $EXIT_NEWER_VERSION_PRESENT)." -ForegroundColor Cyan
-                        # Create a marker file to prevent future attempts
-                        $markerPath = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_5100.marker"
-                        Set-Content -Path $markerPath -Value (Get-Date).ToString()
-                    }
-                    default {
-                        Write-Warning "  Exit code: $($Process.ExitCode) (may indicate already updated or minor issue)"
-                    }
+                }
+                $EXIT_REBOOT_REQUIRED {
+                    Write-Host "  Installation successful. Reboot required." -ForegroundColor Yellow
+                    $RebootRequired.Value = $true
+                }
+                $EXIT_ALREADY_INSTALLED {
+                    Write-Host "  Already installed or newer version present (exit code $EXIT_ALREADY_INSTALLED)." -ForegroundColor Cyan
+                    # Create a marker file to prevent future attempts
+                    $markerPath = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_4096.marker"
+                    Set-Content -Path $markerPath -Value (Get-Date).ToString()
+                }
+                $EXIT_NEWER_VERSION_PRESENT {
+                    Write-Host "  Already installed or newer version present (exit code $EXIT_NEWER_VERSION_PRESENT)." -ForegroundColor Cyan
+                    # Create a marker file to prevent future attempts
+                    $markerPath = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_5100.marker"
+                    Set-Content -Path $markerPath -Value (Get-Date).ToString()
+                }
+                default {
+                    Write-Warning "  Exit code: $($Process.ExitCode) (may indicate already updated or minor issue)"
                 }
             }
         }
-        catch {
-            Write-Warning "  Failed: $_"
-        }
+    }
+    catch {
+        Write-Warning "  Failed: $_"
     }
     Write-Host ""
 }
