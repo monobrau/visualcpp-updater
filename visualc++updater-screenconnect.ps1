@@ -6,14 +6,25 @@
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'Continue'
 
-# Find the main script
-$scriptPath = "C:\temp\visualc++updater.ps1"
-if (-not (Test-Path $scriptPath)) {
-    $scriptPath = Join-Path $PSScriptRoot "visualc++updater.ps1"
+# Try to find the main script in multiple locations
+$scriptLocations = @(
+    (Join-Path $PSScriptRoot "visualc++updater.ps1"),     # Same directory as this script
+    "C:\temp\visualc++updater.ps1",                        # Common temp location
+    (Join-Path $env:TEMP "visualc++updater.ps1")          # User temp directory
+)
+
+$scriptPath = $null
+foreach ($location in $scriptLocations) {
+    if (Test-Path $location) {
+        $scriptPath = $location
+        break
+    }
 }
 
-if (-not (Test-Path $scriptPath)) {
-    Write-Host "ERROR: Script not found in C:\temp or current directory" -ForegroundColor Red
+if (-not $scriptPath) {
+    Write-Host "ERROR: visualc++updater.ps1 not found" -ForegroundColor Red
+    Write-Host "Searched locations:" -ForegroundColor Red
+    $scriptLocations | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     exit 1
 }
 

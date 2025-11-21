@@ -16,9 +16,9 @@
     for versions that are already up to date, saving time and bandwidth.
 
 .NOTES
-    File Name: Update-AllVisualCppRedistributable.ps1
+    File Name: visualc++updater.ps1
     Run this script with administrative privileges.
-    All URLs point to official Microsoft downloads.
+    All URLs point to official Microsoft downloads (HTTPS only).
     
     Version Checking:
     - EOL versions (2005, 2008, 2010, 2012, 2013): Compares against final known versions
@@ -42,6 +42,34 @@
 
 # Enforce TLS 1.2 for downloads
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Exit code constants
+$EXIT_SUCCESS = 0
+$EXIT_ERROR = 1
+$EXIT_REBOOT_REQUIRED = 3010
+$EXIT_ALREADY_INSTALLED = 4096
+$EXIT_NEWER_VERSION_PRESENT = 5100
+
+# Validate temp directory
+if ([string]::IsNullOrWhiteSpace($env:TEMP)) {
+    Write-Error "TEMP environment variable is not set. Cannot proceed."
+    exit $EXIT_ERROR
+}
+
+if (-not (Test-Path $env:TEMP)) {
+    Write-Error "Temp directory does not exist: $env:TEMP"
+    exit $EXIT_ERROR
+}
+
+try {
+    $testFile = Join-Path $env:TEMP "vcredist_test_$(Get-Random).tmp"
+    Set-Content -Path $testFile -Value "test" -ErrorAction Stop
+    Remove-Item -Path $testFile -Force -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Error "Temp directory is not writable: $env:TEMP - $_"
+    exit $EXIT_ERROR
+}
 
 Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host "Visual C++ All Versions Updater (2005-2022)" -ForegroundColor Cyan
@@ -67,8 +95,8 @@ $VCVersions = @{
         TargetVersion = "9.0.30729.5677"
         IsEOL = $true
         URLs = @{
-            x86 = "http://download.windowsupdate.com/msdownload/update/software/secu/2011/05/vcredist_x86_470640aa4bb7db8e69196b5edb0010933569e98d.exe"
-            x64 = "http://download.windowsupdate.com/msdownload/update/software/secu/2011/05/vcredist_x64_a7c83077b8a28d409e36316d2d7321fa0ccdb7e8.exe"
+            x86 = "https://download.windowsupdate.com/msdownload/update/software/secu/2011/05/vcredist_x86_470640aa4bb7db8e69196b5edb0010933569e98d.exe"
+            x64 = "https://download.windowsupdate.com/msdownload/update/software/secu/2011/05/vcredist_x64_a7c83077b8a28d409e36316d2d7321fa0ccdb7e8.exe"
         }
     }
     "2010" = @{
@@ -97,8 +125,8 @@ $VCVersions = @{
         TargetVersion = "12.0.40649.5"
         IsEOL = $true
         URLs = @{
-            x86 = "http://download.microsoft.com/download/c/c/2/cc2df5f8-4454-44b4-802d-5ea68d086676/vcredist_x86.exe"
-            x64 = "http://download.microsoft.com/download/c/c/2/cc2df5f8-4454-44b4-802d-5ea68d086676/vcredist_x64.exe"
+            x86 = "https://download.microsoft.com/download/c/c/2/cc2df5f8-4454-44b4-802d-5ea68d086676/vcredist_x86.exe"
+            x64 = "https://download.microsoft.com/download/c/c/2/cc2df5f8-4454-44b4-802d-5ea68d086676/vcredist_x64.exe"
         }
     }
     "2015-2022" = @{
@@ -213,22 +241,35 @@ function Compare-Version {
         [string]$CurrentVersion,
         [string]$TargetVersion
     )
-    
-    if ([string]::IsNullOrEmpty($CurrentVersion) -or [string]::IsNullOrEmpty($TargetVersion)) {
-        Write-Host "  DEBUG: Version comparison failed - empty version string" -ForegroundColor DarkGray
+
+    # Handle empty or null versions
+    if ([string]::IsNullOrWhiteSpace($CurrentVersion) -or [string]::IsNullOrWhiteSpace($TargetVersion)) {
+        Write-Verbose "Version comparison skipped - empty version string (Current: '$CurrentVersion', Target: '$TargetVersion')"
         return $false
     }
-    
+
     try {
         # Clean versions - remove any non-numeric characters except dots
         $cleanCurrent = $CurrentVersion -replace '[^\d\.]', ''
         $cleanTarget = $TargetVersion -replace '[^\d\.]', ''
-        
+
+        # Validate cleaned versions have content
+        if ([string]::IsNullOrWhiteSpace($cleanCurrent) -or [string]::IsNullOrWhiteSpace($cleanTarget)) {
+            Write-Verbose "Version comparison failed - no numeric content after cleaning (Current: '$CurrentVersion', Target: '$TargetVersion')"
+            return $false
+        }
+
         # Normalize version parts (ensure both have same number of parts)
-        $currentParts = $cleanCurrent.Split('.')
-        $targetParts = $cleanTarget.Split('.')
+        $currentParts = $cleanCurrent.Split('.') | Where-Object { $_ -ne '' }
+        $targetParts = $cleanTarget.Split('.') | Where-Object { $_ -ne '' }
+
+        if ($currentParts.Length -eq 0 -or $targetParts.Length -eq 0) {
+            Write-Verbose "Version comparison failed - no valid parts (Current: '$CurrentVersion', Target: '$TargetVersion')"
+            return $false
+        }
+
         $maxParts = [Math]::Max($currentParts.Length, $targetParts.Length)
-        
+
         # Pad with zeros to match part count
         while ($currentParts.Length -lt $maxParts) {
             $currentParts += "0"
@@ -236,20 +277,28 @@ function Compare-Version {
         while ($targetParts.Length -lt $maxParts) {
             $targetParts += "0"
         }
-        
+
         $normalizedCurrent = $currentParts -join '.'
         $normalizedTarget = $targetParts -join '.'
-        
-        $current = [version]$normalizedCurrent
-        $target = [version]$normalizedTarget
-        
+
+        # Try to parse as version objects
+        try {
+            $current = [version]$normalizedCurrent
+            $target = [version]$normalizedTarget
+        }
+        catch {
+            Write-Verbose "Version comparison failed - invalid version format (Current: '$normalizedCurrent', Target: '$normalizedTarget'): $_"
+            return $false
+        }
+
         $result = ($current -ge $target)
-        Write-Host "  DEBUG: Comparing $normalizedCurrent >= $normalizedTarget = $result" -ForegroundColor DarkGray
-        
+        Write-Verbose "Version comparison: $normalizedCurrent >= $normalizedTarget = $result"
+
         return $result
     }
     catch {
-        Write-Host "  DEBUG: Version comparison exception: $_" -ForegroundColor DarkGray
+        # Unexpected error - log with more detail
+        Write-Warning "Unexpected error in version comparison (Current: '$CurrentVersion', Target: '$TargetVersion'): $_"
         return $false
     }
 }
@@ -260,7 +309,7 @@ function Get-InstallerVersion {
         [Parameter(Mandatory=$true)]
         [string]$FilePath
     )
-    
+
     try {
         if (Test-Path $FilePath) {
             $versionInfo = (Get-Item $FilePath).VersionInfo
@@ -273,8 +322,186 @@ function Get-InstallerVersion {
     catch {
         Write-Warning "Could not read installer version: $_"
     }
-    
+
     return $null
+}
+
+# Function to update a specific architecture (x86 or x64)
+function Update-VCRedistArchitecture {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Version,
+        [Parameter(Mandatory=$true)]
+        [hashtable]$VCInfo,
+        [Parameter(Mandatory=$true)]
+        [hashtable]$InstalledDetails,
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('x86', 'x64')]
+        [string]$Architecture,
+        [Parameter(Mandatory=$true)]
+        [int]$CurrentUpdate,
+        [Parameter(Mandatory=$true)]
+        [int]$TotalUpdates,
+        [Parameter(Mandatory=$true)]
+        [hashtable]$SilentArgsMap,
+        [Parameter(Mandatory=$true)]
+        [string]$TempDir,
+        [Parameter(Mandatory=$true)]
+        [ref]$RebootRequired,
+        [Parameter(Mandatory=$true)]
+        [System.Collections.ArrayList]$DownloadedFiles
+    )
+
+    if ($VCInfo.IsEOL) {
+        $currentVersion = $InstalledDetails.DisplayVersion
+        $targetVersion = $VCInfo.TargetVersion
+
+        Write-Verbose "Current $Architecture version: '$currentVersion', Target: '$targetVersion'"
+
+        # Check if we've already attempted this and got exit code 4096/5100
+        $marker4096 = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_4096.marker"
+        $marker5100 = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_5100.marker"
+        if ((Test-Path $marker4096) -or (Test-Path $marker5100)) {
+            Write-Host "[$CurrentUpdate/$TotalUpdates] $Architecture already attempted - installer returned 'already installed' code - Skipping" -ForegroundColor Cyan
+            Write-Host ""
+            return
+        }
+
+        # For versions with KB numbers, check if KB is already installed
+        if ($VCInfo.KB -match "KB\d+") {
+            $kbNumber = $VCInfo.KB
+            $kbInstalled = Test-KBInstalled -KBNumber $kbNumber
+            Write-Verbose "Checking for $kbNumber installed: $kbInstalled"
+
+            if ($kbInstalled) {
+                Write-Host "[$CurrentUpdate/$TotalUpdates] $Architecture $kbNumber already installed - Skipping" -ForegroundColor Cyan
+                Write-Host ""
+                return
+            }
+        }
+
+        # Also check version number
+        if ($targetVersion -and $currentVersion) {
+            # For EOL versions, if the major.minor.build matches, consider it updated
+            # (e.g., 9.0.30729 is good enough for VC++ 2008, even if target is 9.0.30729.5677)
+            $currentParts = $currentVersion.Split('.')
+            $targetParts = $targetVersion.Split('.')
+
+            # Check if at least the first 3 parts match (major.minor.build)
+            $majorMinorBuildMatch = $false
+            if ($currentParts.Length -ge 3 -and $targetParts.Length -ge 3) {
+                if ($currentParts[0] -eq $targetParts[0] -and
+                    $currentParts[1] -eq $targetParts[1] -and
+                    $currentParts[2] -eq $targetParts[2]) {
+                    $majorMinorBuildMatch = $true
+                    Write-Verbose "Major.Minor.Build matches ($($currentParts[0]).$($currentParts[1]).$($currentParts[2])) - considering as updated"
+                }
+            }
+
+            $isUpToDate = Compare-Version -CurrentVersion $currentVersion -TargetVersion $targetVersion
+            Write-Verbose "Up to date check result: $isUpToDate"
+
+            if ($isUpToDate -or $majorMinorBuildMatch) {
+                Write-Host "[$CurrentUpdate/$TotalUpdates] $Architecture version already up to date ($currentVersion) - Skipping" -ForegroundColor Cyan
+                Write-Host ""
+                return
+            }
+        }
+    }
+
+    # For non-EOL versions, check if current version is recent enough to skip download
+    if (-not $VCInfo.IsEOL -and $VCInfo.MinRecentVersion) {
+        $currentVersion = $InstalledDetails.DisplayVersion
+        if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $VCInfo.MinRecentVersion)) {
+            Write-Host "[$CurrentUpdate/$TotalUpdates] $Architecture version ($currentVersion) is recent enough - Skipping download and installation" -ForegroundColor Cyan
+            Write-Host ""
+            return
+        }
+    }
+
+    Write-Host "[$CurrentUpdate/$TotalUpdates] Processing $Architecture version..." -ForegroundColor Cyan
+
+    $url = $VCInfo.URLs.$Architecture
+
+    if ($VCInfo.Note -eq "Download page only - direct URLs not available") {
+        Write-Host "  NOTE: Visual C++ $Version requires manual download" -ForegroundColor Yellow
+        Write-Host "  Please visit: $url" -ForegroundColor Yellow
+        Write-Host "  Skipping automated update for this version." -ForegroundColor Yellow
+    }
+    else {
+        $installerPath = Join-Path $TempDir "vcredist_${Version}_${Architecture}.exe"
+        [void]$DownloadedFiles.Add($installerPath)
+
+        try {
+            Write-Host "  Downloading..."
+            Invoke-WebRequest -Uri $url -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+            Write-Host "  Download complete." -ForegroundColor Green
+
+            if (Test-Path $installerPath) {
+                # Check installer version for both EOL and non-EOL versions
+                $installerVersion = Get-InstallerVersion -FilePath $installerPath
+                $currentVersion = $InstalledDetails.DisplayVersion
+
+                if ($installerVersion) {
+                    Write-Host "  Downloaded installer version: $installerVersion" -ForegroundColor Gray
+
+                    if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $installerVersion)) {
+                        Write-Host "  Current version ($currentVersion) is already same or newer than installer ($installerVersion) - Skipping installation" -ForegroundColor Cyan
+                        Write-Host ""
+                        return
+                    }
+                }
+
+                Write-Host "  Installing..."
+                $silentArgs = $SilentArgsMap[$Version]
+                $Process = Start-Process -FilePath $installerPath -ArgumentList $silentArgs -Wait -PassThru -WindowStyle Hidden
+
+                switch ($Process.ExitCode) {
+                    $EXIT_SUCCESS {
+                        Write-Host "  Installation successful." -ForegroundColor Green
+
+                        # Verify what changed
+                        if ($VCInfo.IsEOL) {
+                            Start-Sleep -Seconds 2
+                            $newCheck = Test-VCInstalled -DisplayNamePattern $VCInfo.DisplayName -Architecture $Architecture
+                            if ($newCheck.Installed -and $newCheck.Details.DisplayVersion) {
+                                Write-Host "  Registry version after install: $($newCheck.Details.DisplayVersion)" -ForegroundColor Cyan
+                            }
+
+                            # Check if KB is now detected
+                            if ($VCInfo.KB -match "KB\d+") {
+                                $kbCheck = Test-KBInstalled -KBNumber $VCInfo.KB
+                                Write-Host "  $($VCInfo.KB) detected: $kbCheck" -ForegroundColor Cyan
+                            }
+                        }
+                    }
+                    $EXIT_REBOOT_REQUIRED {
+                        Write-Host "  Installation successful. Reboot required." -ForegroundColor Yellow
+                        $RebootRequired.Value = $true
+                    }
+                    $EXIT_ALREADY_INSTALLED {
+                        Write-Host "  Already installed or newer version present (exit code $EXIT_ALREADY_INSTALLED)." -ForegroundColor Cyan
+                        # Create a marker file to prevent future attempts
+                        $markerPath = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_4096.marker"
+                        Set-Content -Path $markerPath -Value (Get-Date).ToString()
+                    }
+                    $EXIT_NEWER_VERSION_PRESENT {
+                        Write-Host "  Already installed or newer version present (exit code $EXIT_NEWER_VERSION_PRESENT)." -ForegroundColor Cyan
+                        # Create a marker file to prevent future attempts
+                        $markerPath = Join-Path $env:TEMP "vcredist_${Version}_${Architecture}_5100.marker"
+                        Set-Content -Path $markerPath -Value (Get-Date).ToString()
+                    }
+                    default {
+                        Write-Warning "  Exit code: $($Process.ExitCode) (may indicate already updated or minor issue)"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Warning "  Failed: $_"
+        }
+    }
+    Write-Host ""
 }
 
 # Scan for installed versions
@@ -313,7 +540,7 @@ Write-Host "=============================================" -ForegroundColor Cyan
 if ($installedVersions.Count -eq 0) {
     Write-Host "No Visual C++ redistributables detected." -ForegroundColor Yellow
     Write-Host "Nothing to update." -ForegroundColor Yellow
-    exit 0
+    exit $EXIT_SUCCESS
 }
 
 # Display what was found
@@ -413,7 +640,7 @@ Write-Host ""
 # Temporary directory for downloads
 $TempDir = $env:TEMP
 $RebootRequired = $false
-$downloadedFiles = @()
+$downloadedFiles = New-Object System.Collections.ArrayList
 
 # Silent installation arguments by version
 $SilentArgsMap = @{
@@ -434,326 +661,44 @@ try {
         
         Write-Host "Processing Visual C++ $version..." -ForegroundColor Yellow
         Write-Host ""
-        
+
         # Update x86 if installed
         if ($installed.x86) {
             $currentUpdate++
-            
-            if ($vcInfo.IsEOL) {
-                $currentVersion = $installed.x86Details.DisplayVersion
-                $targetVersion = $vcInfo.TargetVersion
-                
-                Write-Host "  DEBUG: Current x86 version: '$currentVersion'" -ForegroundColor DarkGray
-                Write-Host "  DEBUG: Target version: '$targetVersion'" -ForegroundColor DarkGray
-                
-                # Check if we've already attempted this and got exit code 4096/5100
-                $marker4096 = Join-Path $env:TEMP "vcredist_${version}_x86_4096.marker"
-                $marker5100 = Join-Path $env:TEMP "vcredist_${version}_x86_5100.marker"
-                if ((Test-Path $marker4096) -or (Test-Path $marker5100)) {
-                    Write-Host "[$currentUpdate/$updateCount] x86 already attempted - installer returned 'already installed' code - Skipping" -ForegroundColor Cyan
-                    Write-Host ""
-                    continue
-                }
-                
-                # For versions with KB numbers, check if KB is already installed
-                if ($vcInfo.KB -match "KB\d+") {
-                    $kbNumber = $vcInfo.KB
-                    $kbInstalled = Test-KBInstalled -KBNumber $kbNumber
-                    Write-Host "  DEBUG: Checking for $kbNumber installed: $kbInstalled" -ForegroundColor DarkGray
-                    
-                    if ($kbInstalled) {
-                        Write-Host "[$currentUpdate/$updateCount] x86 $kbNumber already installed - Skipping" -ForegroundColor Cyan
-                        Write-Host ""
-                        continue
-                    }
-                }
-                
-                # Also check version number
-                if ($targetVersion -and $currentVersion) {
-                    # For EOL versions, if the major.minor.build matches, consider it updated
-                    # (e.g., 9.0.30729 is good enough for VC++ 2008, even if target is 9.0.30729.5677)
-                    $currentParts = $currentVersion.Split('.')
-                    $targetParts = $targetVersion.Split('.')
-                    
-                    # Check if at least the first 3 parts match (major.minor.build)
-                    $majorMinorBuildMatch = $false
-                    if ($currentParts.Length -ge 3 -and $targetParts.Length -ge 3) {
-                        if ($currentParts[0] -eq $targetParts[0] -and 
-                            $currentParts[1] -eq $targetParts[1] -and 
-                            $currentParts[2] -eq $targetParts[2]) {
-                            $majorMinorBuildMatch = $true
-                            Write-Host "  DEBUG: Major.Minor.Build matches ($($currentParts[0]).$($currentParts[1]).$($currentParts[2])) - considering as updated" -ForegroundColor DarkGray
-                        }
-                    }
-                    
-                    $isUpToDate = Compare-Version -CurrentVersion $currentVersion -TargetVersion $targetVersion
-                    Write-Host "  DEBUG: Up to date check result: $isUpToDate" -ForegroundColor DarkGray
-                    
-                    if ($isUpToDate -or $majorMinorBuildMatch) {
-                        Write-Host "[$currentUpdate/$updateCount] x86 version already up to date ($currentVersion) - Skipping" -ForegroundColor Cyan
-                        Write-Host ""
-                        continue
-                    }
-                }
-            }
-            
-            # For non-EOL versions, check if current version is recent enough to skip download
-            if (-not $vcInfo.IsEOL -and $vcInfo.MinRecentVersion) {
-                $currentVersion = $installed.x86Details.DisplayVersion
-                if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $vcInfo.MinRecentVersion)) {
-                    Write-Host "[$currentUpdate/$updateCount] x86 version ($currentVersion) is recent enough - Skipping download and installation" -ForegroundColor Cyan
-                    Write-Host ""
-                    continue
-                }
-            }
-            
-            Write-Host "[$currentUpdate/$updateCount] Processing x86 version..." -ForegroundColor Cyan
-            
-            $url = $vcInfo.URLs.x86
-            
-            if ($vcInfo.Note -eq "Download page only - direct URLs not available") {
-                Write-Host "  NOTE: Visual C++ $version requires manual download" -ForegroundColor Yellow
-                Write-Host "  Please visit: $url" -ForegroundColor Yellow
-                Write-Host "  Skipping automated update for this version." -ForegroundColor Yellow
-            }
-            else {
-                $installerPath = Join-Path $TempDir "vcredist_${version}_x86.exe"
-                $downloadedFiles += $installerPath
-                
-                try {
-                    Write-Host "  Downloading..."
-                    Invoke-WebRequest -Uri $url -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
-                    Write-Host "  Download complete." -ForegroundColor Green
-                    
-                    if (Test-Path $installerPath) {
-                        # Check installer version for both EOL and non-EOL versions
-                        $installerVersion = Get-InstallerVersion -FilePath $installerPath
-                        $currentVersion = $installed.x86Details.DisplayVersion
-                        
-                        if ($installerVersion) {
-                            Write-Host "  Downloaded installer version: $installerVersion" -ForegroundColor Gray
-                            
-                            if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $installerVersion)) {
-                                Write-Host "  Current version ($currentVersion) is already same or newer than installer ($installerVersion) - Skipping installation" -ForegroundColor Cyan
-                                Write-Host ""
-                                continue
-                            }
-                        }
-                        
-                        Write-Host "  Installing..."
-                        $silentArgs = $SilentArgsMap[$version]
-                        $Process = Start-Process -FilePath $installerPath -ArgumentList $silentArgs -Wait -PassThru -WindowStyle Hidden
-                        
-                        switch ($Process.ExitCode) {
-                            0 { 
-                                Write-Host "  Installation successful." -ForegroundColor Green
-                                
-                                # Verify what changed
-                                if ($vcInfo.IsEOL) {
-                                    Start-Sleep -Seconds 2
-                                    $newCheck = Test-VCInstalled -DisplayNamePattern $vcInfo.DisplayName -Architecture "x86"
-                                    if ($newCheck.Installed -and $newCheck.Details.DisplayVersion) {
-                                        Write-Host "  Registry version after install: $($newCheck.Details.DisplayVersion)" -ForegroundColor Cyan
-                                    }
-                                    
-                                    # Check if KB is now detected
-                                    if ($vcInfo.KB -match "KB\d+") {
-                                        $kbCheck = Test-KBInstalled -KBNumber $vcInfo.KB
-                                        Write-Host "  $($vcInfo.KB) detected: $kbCheck" -ForegroundColor Cyan
-                                    }
-                                }
-                            }
-                            3010 { 
-                                Write-Host "  Installation successful. Reboot required." -ForegroundColor Yellow
-                                $RebootRequired = $true
-                            }
-                            4096 {
-                                Write-Host "  Already installed or newer version present (exit code 4096)." -ForegroundColor Cyan
-                                # Create a marker file to prevent future attempts
-                                $markerPath = Join-Path $env:TEMP "vcredist_${version}_x86_4096.marker"
-                                Set-Content -Path $markerPath -Value (Get-Date).ToString()
-                            }
-                            5100 {
-                                Write-Host "  Already installed or newer version present (exit code 5100)." -ForegroundColor Cyan
-                                # Create a marker file to prevent future attempts
-                                $markerPath = Join-Path $env:TEMP "vcredist_${version}_x86_5100.marker"
-                                Set-Content -Path $markerPath -Value (Get-Date).ToString()
-                            }
-                            default { 
-                                Write-Warning "  Exit code: $($Process.ExitCode) (may indicate already updated or minor issue)"
-                            }
-                        }
-                    }
-                }
-                catch {
-                    Write-Warning "  Failed: $_"
-                }
-            }
-            Write-Host ""
+            Update-VCRedistArchitecture `
+                -Version $version `
+                -VCInfo $vcInfo `
+                -InstalledDetails $installed.x86Details `
+                -Architecture "x86" `
+                -CurrentUpdate $currentUpdate `
+                -TotalUpdates $updateCount `
+                -SilentArgsMap $SilentArgsMap `
+                -TempDir $TempDir `
+                -RebootRequired ([ref]$RebootRequired) `
+                -DownloadedFiles $downloadedFiles
         }
-        
+
         # Update x64 if installed
         if ($installed.x64) {
             $currentUpdate++
-            
-            if ($vcInfo.IsEOL) {
-                $currentVersion = $installed.x64Details.DisplayVersion
-                $targetVersion = $vcInfo.TargetVersion
-                
-                Write-Host "  DEBUG: Current x64 version: '$currentVersion'" -ForegroundColor DarkGray
-                Write-Host "  DEBUG: Target version: '$targetVersion'" -ForegroundColor DarkGray
-                
-                # Check if we've already attempted this and got exit code 4096/5100
-                $marker4096 = Join-Path $env:TEMP "vcredist_${version}_x64_4096.marker"
-                $marker5100 = Join-Path $env:TEMP "vcredist_${version}_x64_5100.marker"
-                if ((Test-Path $marker4096) -or (Test-Path $marker5100)) {
-                    Write-Host "[$currentUpdate/$updateCount] x64 already attempted - installer returned 'already installed' code - Skipping" -ForegroundColor Cyan
-                    Write-Host ""
-                    continue
-                }
-                
-                # For versions with KB numbers, check if KB is already installed
-                if ($vcInfo.KB -match "KB\d+") {
-                    $kbNumber = $vcInfo.KB
-                    $kbInstalled = Test-KBInstalled -KBNumber $kbNumber
-                    Write-Host "  DEBUG: Checking for $kbNumber installed: $kbInstalled" -ForegroundColor DarkGray
-                    
-                    if ($kbInstalled) {
-                        Write-Host "[$currentUpdate/$updateCount] x64 $kbNumber already installed - Skipping" -ForegroundColor Cyan
-                        Write-Host ""
-                        continue
-                    }
-                }
-                
-                # Also check version number
-                if ($targetVersion -and $currentVersion) {
-                    # For EOL versions, if the major.minor.build matches, consider it updated
-                    # (e.g., 9.0.30729 is good enough for VC++ 2008, even if target is 9.0.30729.5677)
-                    $currentParts = $currentVersion.Split('.')
-                    $targetParts = $targetVersion.Split('.')
-                    
-                    # Check if at least the first 3 parts match (major.minor.build)
-                    $majorMinorBuildMatch = $false
-                    if ($currentParts.Length -ge 3 -and $targetParts.Length -ge 3) {
-                        if ($currentParts[0] -eq $targetParts[0] -and 
-                            $currentParts[1] -eq $targetParts[1] -and 
-                            $currentParts[2] -eq $targetParts[2]) {
-                            $majorMinorBuildMatch = $true
-                            Write-Host "  DEBUG: Major.Minor.Build matches ($($currentParts[0]).$($currentParts[1]).$($currentParts[2])) - considering as updated" -ForegroundColor DarkGray
-                        }
-                    }
-                    
-                    $isUpToDate = Compare-Version -CurrentVersion $currentVersion -TargetVersion $targetVersion
-                    Write-Host "  DEBUG: Up to date check result: $isUpToDate" -ForegroundColor DarkGray
-                    
-                    if ($isUpToDate -or $majorMinorBuildMatch) {
-                        Write-Host "[$currentUpdate/$updateCount] x64 version already up to date ($currentVersion) - Skipping" -ForegroundColor Cyan
-                        Write-Host ""
-                        continue
-                    }
-                }
-            }
-            
-            # For non-EOL versions, check if current version is recent enough to skip download
-            if (-not $vcInfo.IsEOL -and $vcInfo.MinRecentVersion) {
-                $currentVersion = $installed.x64Details.DisplayVersion
-                if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $vcInfo.MinRecentVersion)) {
-                    Write-Host "[$currentUpdate/$updateCount] x64 version ($currentVersion) is recent enough - Skipping download and installation" -ForegroundColor Cyan
-                    Write-Host ""
-                    continue
-                }
-            }
-            
-            Write-Host "[$currentUpdate/$updateCount] Processing x64 version..." -ForegroundColor Cyan
-            
-            $url = $vcInfo.URLs.x64
-            
-            if ($vcInfo.Note -eq "Download page only - direct URLs not available") {
-                Write-Host "  NOTE: Visual C++ $version requires manual download" -ForegroundColor Yellow
-                Write-Host "  Please visit: $url" -ForegroundColor Yellow
-                Write-Host "  Skipping automated update for this version." -ForegroundColor Yellow
-            }
-            else {
-                $installerPath = Join-Path $TempDir "vcredist_${version}_x64.exe"
-                $downloadedFiles += $installerPath
-                
-                try {
-                    Write-Host "  Downloading..."
-                    Invoke-WebRequest -Uri $url -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
-                    Write-Host "  Download complete." -ForegroundColor Green
-                    
-                    if (Test-Path $installerPath) {
-                        # Check installer version for both EOL and non-EOL versions
-                        $installerVersion = Get-InstallerVersion -FilePath $installerPath
-                        $currentVersion = $installed.x64Details.DisplayVersion
-                        
-                        if ($installerVersion) {
-                            Write-Host "  Downloaded installer version: $installerVersion" -ForegroundColor Gray
-                            
-                            if ($currentVersion -and (Compare-Version -CurrentVersion $currentVersion -TargetVersion $installerVersion)) {
-                                Write-Host "  Current version ($currentVersion) is already same or newer than installer ($installerVersion) - Skipping installation" -ForegroundColor Cyan
-                                Write-Host ""
-                                continue
-                            }
-                        }
-                        
-                        Write-Host "  Installing..."
-                        $silentArgs = $SilentArgsMap[$version]
-                        $Process = Start-Process -FilePath $installerPath -ArgumentList $silentArgs -Wait -PassThru -WindowStyle Hidden
-                        
-                        switch ($Process.ExitCode) {
-                            0 { 
-                                Write-Host "  Installation successful." -ForegroundColor Green
-                                
-                                # Verify what changed
-                                if ($vcInfo.IsEOL) {
-                                    Start-Sleep -Seconds 2
-                                    $newCheck = Test-VCInstalled -DisplayNamePattern $vcInfo.DisplayName -Architecture "x64"
-                                    if ($newCheck.Installed -and $newCheck.Details.DisplayVersion) {
-                                        Write-Host "  Registry version after install: $($newCheck.Details.DisplayVersion)" -ForegroundColor Cyan
-                                    }
-                                    
-                                    # Check if KB is now detected
-                                    if ($vcInfo.KB -match "KB\d+") {
-                                        $kbCheck = Test-KBInstalled -KBNumber $vcInfo.KB
-                                        Write-Host "  $($vcInfo.KB) detected: $kbCheck" -ForegroundColor Cyan
-                                    }
-                                }
-                            }
-                            3010 { 
-                                Write-Host "  Installation successful. Reboot required." -ForegroundColor Yellow
-                                $RebootRequired = $true
-                            }
-                            4096 {
-                                Write-Host "  Already installed or newer version present (exit code 4096)." -ForegroundColor Cyan
-                                # Create a marker file to prevent future attempts
-                                $markerPath = Join-Path $env:TEMP "vcredist_${version}_x64_4096.marker"
-                                Set-Content -Path $markerPath -Value (Get-Date).ToString()
-                            }
-                            5100 {
-                                Write-Host "  Already installed or newer version present (exit code 5100)." -ForegroundColor Cyan
-                                # Create a marker file to prevent future attempts
-                                $markerPath = Join-Path $env:TEMP "vcredist_${version}_x64_5100.marker"
-                                Set-Content -Path $markerPath -Value (Get-Date).ToString()
-                            }
-                            default { 
-                                Write-Warning "  Exit code: $($Process.ExitCode) (may indicate already updated or minor issue)"
-                            }
-                        }
-                    }
-                }
-                catch {
-                    Write-Warning "  Failed: $_"
-                }
-            }
-            Write-Host ""
+            Update-VCRedistArchitecture `
+                -Version $version `
+                -VCInfo $vcInfo `
+                -InstalledDetails $installed.x64Details `
+                -Architecture "x64" `
+                -CurrentUpdate $currentUpdate `
+                -TotalUpdates $updateCount `
+                -SilentArgsMap $SilentArgsMap `
+                -TempDir $TempDir `
+                -RebootRequired ([ref]$RebootRequired) `
+                -DownloadedFiles $downloadedFiles
         }
     }
-    
+
     Write-Host ""
     Write-Host "=============================================" -ForegroundColor Cyan
     Write-Host "Update process completed." -ForegroundColor Green
-    
+
     if ($RebootRequired) {
         Write-Host ""
         Write-Host "IMPORTANT: A system reboot is required." -ForegroundColor Yellow
@@ -766,12 +711,12 @@ catch {
     Write-Host "=============================================" -ForegroundColor Red
     Write-Error "An error occurred: $_"
     Write-Host "=============================================" -ForegroundColor Red
-    exit 1
+    exit $EXIT_ERROR
 }
 finally {
     Write-Host ""
     Write-Host "Cleaning up temporary files..."
-    
+
     foreach ($file in $downloadedFiles) {
         if (Test-Path $file) {
             try {
@@ -783,6 +728,6 @@ finally {
             }
         }
     }
-    
+
     Write-Host "Cleanup complete."
 }
